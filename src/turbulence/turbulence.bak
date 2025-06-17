@@ -1,0 +1,171 @@
+#include <gsl/gsl_errno.h>
+#include <gsl/gsl_rng.h>
+#include <math.h>
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <complex.h>
+#include <fftw3.h>
+
+#include "../main/allvars.h"
+#include "../main/proto.h"
+
+#include "../domain/domain.h"
+#include "../mesh/voronoi/voronoi.h"
+
+
+#ifdef TURBULENCE
+#define PI 3.141592653589793
+#define INDEX(i, j, k) ((i) * (PhaseField_Ny) * (PhaseField_Nz) + (j) * (PhaseField_Nz) + (k))
+
+
+double random_normal() {
+    // Generate a standard normal random number using Box-Muller transform
+    // double u1 = rand() / (double)RAND_MAX;
+    // double u2 = rand() / (double)RAND_MAX; sqrt(-2.0 * log(u1)) * cos(2.0 * PI * u2)
+    double u, v, s;
+    do {
+        u = ((double) rand() / RAND_MAX) * 2.0 - 1.0;
+        v = ((double) rand() / RAND_MAX) * 2.0 - 1.0;
+        s = u * u + v * v;
+    } while (s >= 1.0 || s == 0.0);
+
+    double factor = sqrt(-2.0 * log(s) / s);
+    return u * factor;
+}
+
+
+void OU_process(double sigma, double f) {
+    for (int l = 0; l < 3; l++) {
+        for (int i = 0; i < PhaseField_Nx; i++) {
+            for (int j = 0; j < PhaseField_Ny; j++) {
+                for (int k = 0; k < PhaseField_Nz; k++) {
+                    int idx = INDEX(i, j, k);
+                    PhaseField[l][idx] = PhaseField[l][idx] * f + sigma * sqrt(1 - f * f) * random_normal();
+                }
+            }
+        }
+    }
+}
+
+
+// Helmholtz decomposition to obtain the solenoidal component
+void helmholtz_to_solenoid(fftw_complex *a[3], 
+                           double kx[PhaseField_Nx], double ky[PhaseField_Ny], double kz[PhaseField_Nz], 
+                           fftw_complex *a_sol[3]) {
+    for (int i = 0; i < PhaseField_Nx; i++) {
+        for (int j = 0; j < PhaseField_Ny; j++) {
+            for (int k = 0; k < PhaseField_Nz; k++) {
+                double kx_val = kx[i];
+                double ky_val = ky[j];
+                double kz_val = kz[k];
+                double k_sq = kx_val * kx_val + ky_val * ky_val + kz_val * kz_val + 0.000001;
+
+                int idx = INDEX(i, j, k);
+                fftw_complex dot_product = kx_val * a[0][idx] + ky_val * a[1][idx] + kz_val * a[2][idx];
+                
+                for (int l = 0; l < 3; l++) {
+                    double k_component = (l == 0 ? kx_val : (l == 1 ? ky_val : kz_val));
+                    a_sol[l][idx] = a[l][idx] - k_component / k_sq * dot_product;
+                }
+            }
+        }
+    }
+}
+
+
+void do_turbulence() {
+    // fftw_complex *a[3], *a_sol[3], *acc3d[3];
+
+    // if (ThisTask == 0) {
+    //     printf("TURBULENCE: Updating the random phases with OU Process\n");
+    //     OU_process(turbulence_sigma, turbulence_f);
+    // }
+    // MPI_Barrier(MPI_COMM_WORLD);
+
+    // for (int l = 0; l < 3; l++) {
+    //     a[l] = fftw_malloc(sizeof(fftw_complex) * PhaseField_Nx * PhaseField_Ny * PhaseField_Nz);
+    //     a_sol[l] = fftw_malloc(sizeof(fftw_complex) * PhaseField_Nx * PhaseField_Ny * PhaseField_Nz);
+    //     acc3d[l] = fftw_malloc(sizeof(fftw_complex) * PhaseField_Nx * PhaseField_Ny * PhaseField_Nz);
+    // }
+
+    TIMER_START(CPU_TURBULENCE);
+    // bool foundnan = false;
+    // for (int l = 0; l < 3; l++) {
+    //     for (int i = 0; i < PhaseField_Nx; i++) {
+    //         for (int j = 0; j < PhaseField_Ny; j++) {
+    //             for (int k = 0; k < PhaseField_Nz; k++) {
+    //                 int idx = (i) * (PhaseField_Ny) * (PhaseField_Nz) + (j) * (PhaseField_Nz) + (k);
+    //                 if (isnan(PhaseField[l][idx])) {
+    //                     if (!foundnan) {
+    //                         printf("There was a nan");
+    //                         foundnan = true;
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+
+
+    for (int i = 0; i < PhaseField_Nx; i++) {
+        for (int j = 0; j < PhaseField_Ny; j++) {
+            for (int k = 0; k < PhaseField_Nz; k++) {
+                int idx = INDEX(i, j, k);
+                for (int l = 0; l < 3; l++) {
+                    a[l][idx] = a_amps[l][idx] * cexp(I * PhaseField[l][idx]);
+                }
+            }
+        }
+    }
+
+    // remove non solenoidal part, dont do that for now
+    // helmholtz_to_solenoid(a, kx, ky, kz, a_sol);
+
+    // perform fft to get the 3d acceleration field in position space
+    for (int l = 0; l < 3; l++) {
+        fftw_plan plan;
+        plan = fftw_plan_dft_3d(PhaseField_Nx, PhaseField_Ny, PhaseField_Nz, a[l], acc3d[l], -1, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
+    }
+    
+
+    int count = 0;
+    for(int idx = 0; idx < NumGas; idx++) {
+        int i = idx; // TimeBinsHydro.ActiveParticleList[idx];
+        if (i < 0) {
+            continue;
+        }
+
+        int grid_x = floor(P[i].Pos[0]/All.BoxSize * PhaseField_Nx);
+        int grid_y = floor(P[i].Pos[1]/All.BoxSize * PhaseField_Ny);
+        int grid_z = floor(P[i].Pos[2]/All.BoxSize * PhaseField_Nz);
+        int acc_idx = INDEX(grid_z, grid_y, grid_x);
+        double new_pos[3];
+        double new_vel[3];
+        for (int l = 0; l < 3; l++) {
+            P[i].GravAccel[l] = creal(acc3d[l][acc_idx]);
+        }
+        count++;
+    }
+
+    int global_count = 0;
+    MPI_Reduce(&count, &global_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    mpi_printf("TURBULENCE: Updated acceleration of %d particles\n", global_count);
+
+    OU_process(turbulence_sigma, turbulence_f);
+    TIMER_STOP(CPU_TURBULENCE);
+
+    // for (int l = 0; l < 3; l++) {
+    //     fftw_free(a[l]);
+    //     fftw_free(a_sol[l]);
+    //     free(acc3d[l]);
+    // }
+}
+#endif
