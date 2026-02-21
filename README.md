@@ -1,3 +1,32 @@
+# Arepo with Forced Isotropic Turbulence Module
+
+This repository contains the public version of the Arepo code, along with additional code developed to run simulations of forced isotropic turbulence.
+
+The primary extension can be found in:
+
+    src/turbulence
+
+## Compilation
+
+When compiling the code, the following configuration options must be enabled:
+
+    EXTERNALGRAVITY
+    TURBULENCE
+
+## Method
+
+The forcing method implemented here follows the approach described in:
+
+- Federrath et al. (2010), *Comparing the statistics of interstellar turbulence in simulations and observations: Solenoidal versus compressive turbulence forcing*. https://arxiv.org/abs/0905.1060  
+
+An additional useful reference implementation by the original authors is available at:
+
+- https://github.com/chfeder/turbulence_generator
+
+---
+
+The Arepo public version Readme:
+
 Arepo public version
 ====================
 
